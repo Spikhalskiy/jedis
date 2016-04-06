@@ -62,7 +62,7 @@ public class JedisClusterInfoCache {
           }
 
           HostAndPort targetNode = generateHostAndPort(hostInfos);
-          setNodeIfNotExist(targetNode);
+          setupNodeIfNotExist(targetNode);
           if (i == MASTER_NODE_INDEX) {
             assignSlotsToNode(slotNums, targetNode);
           }
@@ -80,21 +80,24 @@ public class JedisClusterInfoCache {
       rediscovering = true;
 
       try {
-        this.slots.clear();
-
         List<Object> slots = jedis.clusterSlots();
+
+        // We should clear slots after getting result about cluster slots, because if we got exception or timeout in
+        // getting new slots state, which is possible, because it's an external operation - we could got empty slots collection
+        // and ton of new Jedis instances for random nodes, see JedisSlotBasedConnectionHandler#getConnectionFromSlot
+        this.slots.clear();
 
         for (Object slotInfoObj : slots) {
           List<Object> slotInfo = (List<Object>) slotInfoObj;
 
-          if (slotInfo.size() <= 2) {
+          if (slotInfo.size() <= MASTER_NODE_INDEX) {
             continue;
           }
 
           List<Integer> slotNums = getAssignedSlotArray(slotInfo);
 
           // hostInfos
-          List<Object> hostInfos = (List<Object>) slotInfo.get(2);
+          List<Object> hostInfos = (List<Object>) slotInfo.get(MASTER_NODE_INDEX);
           if (hostInfos.isEmpty()) {
             continue;
           }
@@ -102,7 +105,6 @@ public class JedisClusterInfoCache {
           // at this time, we just use master, discard slave information
           HostAndPort targetNode = generateHostAndPort(hostInfos);
 
-          setNodeIfNotExist(targetNode);
           assignSlotsToNode(slotNums, targetNode);
         }
       } finally {
@@ -117,15 +119,17 @@ public class JedisClusterInfoCache {
         ((Long) hostInfos.get(1)).intValue());
   }
 
-  public void setNodeIfNotExist(HostAndPort node) {
+  public JedisPool setupNodeIfNotExist(HostAndPort node) {
     w.lock();
     try {
       String nodeKey = getNodeKey(node);
-      if (nodes.containsKey(nodeKey)) return;
+      JedisPool existingPool = nodes.get(nodeKey);
+      if (existingPool != null) return existingPool;
 
       JedisPool nodePool = new JedisPool(poolConfig, node.getHost(), node.getPort(),
-              connectionTimeout, soTimeout, null, 0, null);
+                                         connectionTimeout, soTimeout, null, 0, null);
       nodes.put(nodeKey, nodePool);
+      return nodePool;
     } finally {
       w.unlock();
     }
@@ -134,12 +138,7 @@ public class JedisClusterInfoCache {
   public void assignSlotToNode(int slot, HostAndPort targetNode) {
     w.lock();
     try {
-      JedisPool targetPool = nodes.get(getNodeKey(targetNode));
-
-      if (targetPool == null) {
-        setNodeIfNotExist(targetNode);
-        targetPool = nodes.get(getNodeKey(targetNode));
-      }
+      JedisPool targetPool = setupNodeIfNotExist(targetNode);
       slots.put(slot, targetPool);
     } finally {
       w.unlock();
@@ -149,13 +148,7 @@ public class JedisClusterInfoCache {
   public void assignSlotsToNode(List<Integer> targetSlots, HostAndPort targetNode) {
     w.lock();
     try {
-      JedisPool targetPool = nodes.get(getNodeKey(targetNode));
-
-      if (targetPool == null) {
-        setNodeIfNotExist(targetNode);
-        targetPool = nodes.get(getNodeKey(targetNode));
-      }
-
+      JedisPool targetPool = setupNodeIfNotExist(targetNode);
       for (Integer slot : targetSlots) {
         slots.put(slot, targetPool);
       }
