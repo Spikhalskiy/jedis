@@ -3,6 +3,7 @@ package redis.clients.jedis;
 import redis.clients.util.SafeEncoder;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -10,6 +11,9 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
+
+import redis.clients.jedis.exceptions.JedisConnectionException;
+import redis.clients.jedis.exceptions.JedisException;
 
 public class JedisClusterInfoCache {
   private final Map<String, JedisPool> nodes = new HashMap<String, JedisPool>();
@@ -73,44 +77,64 @@ public class JedisClusterInfoCache {
     }
   }
 
-  public void discoverClusterSlots(Jedis jedis) {
+  public void renewClusterSlots(Jedis jedis) {
     //If rediscovering is already in process - no need to start one more same rediscovering, just return
     if (!rediscovering) {
-      w.lock();
-      rediscovering = true;
-
       try {
-        List<Object> slots = jedis.clusterSlots();
+        w.lock();
+        rediscovering = true;
 
-        // We should clear slots after getting result about cluster slots, because if we got exception or timeout in
-        // getting new slots state, which is possible, because it's an external operation - we could got empty slots collection
-        // and ton of new Jedis instances for random nodes, see JedisSlotBasedConnectionHandler#getConnectionFromSlot
-        this.slots.clear();
-
-        for (Object slotInfoObj : slots) {
-          List<Object> slotInfo = (List<Object>) slotInfoObj;
-
-          if (slotInfo.size() <= MASTER_NODE_INDEX) {
-            continue;
+        if (jedis != null) {
+          try {
+            discoverClusterSlots(jedis);
+            return;
+          } catch (JedisException e) {
+            //try nodes from all pools
           }
+        }
 
-          List<Integer> slotNums = getAssignedSlotArray(slotInfo);
-
-          // hostInfos
-          List<Object> hostInfos = (List<Object>) slotInfo.get(MASTER_NODE_INDEX);
-          if (hostInfos.isEmpty()) {
-            continue;
+        for (JedisPool jp : getShuffledNodesPool()) {
+          try {
+            jedis = jp.getResource();
+            discoverClusterSlots(jedis);
+            return;
+          } catch (JedisConnectionException e) {
+            // try next nodes
+          } finally {
+            if (jedis != null) {
+              jedis.close();
+            }
           }
-
-          // at this time, we just use master, discard slave information
-          HostAndPort targetNode = generateHostAndPort(hostInfos);
-
-          assignSlotsToNode(slotNums, targetNode);
         }
       } finally {
         rediscovering = false;
         w.unlock();
       }
+    }
+  }
+
+  private void discoverClusterSlots(Jedis jedis) {
+    List<Object> slots = jedis.clusterSlots();
+    this.slots.clear();
+
+    for (Object slotInfoObj : slots) {
+      List<Object> slotInfo = (List<Object>) slotInfoObj;
+
+      if (slotInfo.size() <= MASTER_NODE_INDEX) {
+        continue;
+      }
+
+      List<Integer> slotNums = getAssignedSlotArray(slotInfo);
+
+      // hostInfos
+      List<Object> hostInfos = (List<Object>) slotInfo.get(MASTER_NODE_INDEX);
+      if (hostInfos.isEmpty()) {
+        continue;
+      }
+
+      // at this time, we just use master, discard slave information
+      HostAndPort targetNode = generateHostAndPort(hostInfos);
+      assignSlotsToNode(slotNums, targetNode);
     }
   }
 
@@ -184,6 +208,17 @@ public class JedisClusterInfoCache {
     }
   }
 
+  public List<JedisPool> getShuffledNodesPool() {
+    r.lock();
+    try {
+      List<JedisPool> pools = new ArrayList<JedisPool>(nodes.values());
+      Collections.shuffle(pools);
+      return pools;
+    } finally {
+      r.unlock();
+    }
+  }
+
   /**
    * Clear discovered nodes collections and gently release allocated resources
    */
@@ -226,5 +261,4 @@ public class JedisClusterInfoCache {
     }
     return slotNums;
   }
-
 }

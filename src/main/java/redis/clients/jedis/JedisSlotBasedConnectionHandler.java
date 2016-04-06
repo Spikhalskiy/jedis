@@ -27,7 +27,7 @@ public class JedisSlotBasedConnectionHandler extends JedisClusterConnectionHandl
     // ping-pong)
     // or exception if all connections are invalid
 
-    List<JedisPool> pools = getShuffledNodesPool();
+    List<JedisPool> pools = cache.getShuffledNodesPool();
 
     for (JedisPool pool : pools) {
       Jedis jedis = null;
@@ -61,7 +61,7 @@ public class JedisSlotBasedConnectionHandler extends JedisClusterConnectionHandl
       // assignment
       return connectionPool.getResource();
     } else {
-      renewSlotCache(); //It's abnormal situation for cluster mode, that we have just nothing for slot, try to rediscover state
+      cache.renewClusterSlots(null); //It's abnormal situation for cluster mode, that we have just nothing for slot, try to rediscover state
       connectionPool = cache.getSlotPool(slot);
       if (connectionPool != null) {
         return connectionPool.getResource();
